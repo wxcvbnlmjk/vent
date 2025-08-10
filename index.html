@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Carte vent animée — Gironde (Demo)</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+  body,html { height:100%; margin:0; }
+  #map { width:100%; height:100vh; }
+  .infoBox { position: absolute; right:10px; top:10px; z-index:1000; background:white; padding:8px; border-radius:6px; box-shadow:0 1px 6px rgba(0,0,0,.2); font-family:Arial; font-size:13px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="infoBox">Source météo : Open-Meteo (gratuit, pas de clé). Zone : Gironde.</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<!-- leaflet-velocity (dist min) -->
+<script src="https://unpkg.com/leaflet-velocity/dist/leaflet-velocity.min.js"></script>
+
+<script>
+(async function(){
+
+  // === 1) BBOX Gironde (issue publique) ===
+  // top, bottom, left, right (latitudes/longitudes)
+  const TOP = 45.7185;
+  const BOTTOM = 44.095;
+  const LEFT = -1.441;
+  const RIGHT = 0.442;
+
+  // Param grille (ajuste selon perf)
+  const NX = 5; // colonnes (lon)
+  const NY = 5; // lignes (lat)
+
+  // Choix de l'heure : on prend l'heure actuelle arrondie à l'heure
+  const now = new Date();
+  now.setMinutes(0,0,0);
+
+  // Génère les points de la grille (ordre row-major: lat desc -> lon asc)
+  function makeGrid(nx, ny, left, right, bottom, top) {
+    const lons = [];
+    const lats = [];
+    const dx = (right - left) / (nx - 1);
+    const dy = (top - bottom) / (ny - 1);
+    for (let j = 0; j < ny; j++) {
+      const lat = top - j * dy; // top -> bottom
+      for (let i = 0; i < nx; i++) {
+        const lon = left + i * dx;
+        lats.push(lat);
+        lons.push(lon);
+      }
+    }
+    return {lats, lons, dx, dy};
+  }
+
+  const grid = makeGrid(NX, NY, LEFT, RIGHT, BOTTOM, TOP);
+
+  // Build Open-Meteo API URL with multiple coordinates
+  // Open-Meteo accepts &latitude=lat1,lat2&longitude=lon1,lon2 (paired)
+  // Variables we request: wind_speed_10m, wind_direction_10m (hourly)
+  const base = 'https://api.open-meteo.com/v1/forecast';
+  // create comma-separated lists
+  const latParam = grid.lats.join(',');
+  const lonParam = grid.lons.join(',');
+  const hourlyVars = 'wind_speed_10m,wind_direction_10m';
+  const timezone = 'auto';
+
+  const url = `${base}?latitude=${latParam}&longitude=${lonParam}&hourly=${hourlyVars}&timezone=${timezone}`;
+
+  // Note: pour très grosse grille l'URL peut devenir longue => réduire NX/NY si nécessaire.
+  let resp;
+  try {
+    resp = await fetch(url);
+    if (!resp.ok) throw new Error('Erreur requête Open-Meteo: ' + resp.status);
+  } catch (err) {
+    alert('Impossible de joindre Open-Meteo : ' + err.message + '\nRéduis la résolution (NX/NY) ou vérifie ta connexion.');
+    return;
+  }
+
+  const json = await resp.json();
+
+  // Quand on demande plusieurs emplacements, Open-Meteo retourne un tableau locations[]
+  // Vérifie la structure
+  const locations = json?.hourly?.length ? json.hourly : json; // fallback (mais normalement json is array)
+  // Open-Meteo, quand on passe plusieurs coords, renvoie "hourly": [{"time":[], "wind_speed_10m":[], ...}, ...]
+  if (!Array.isArray(json)) {
+    // Some responses wrap differently; try to detect
+    if (json.hourly && Array.isArray(json.hourly.time) && json.latitude && json.longitude) {
+      // single location case (shouldn't happen here)
+      alert('Open-Meteo a retourné un emplacement unique (URL peut être trop long/transformé).');
+      return;
+    }
+  }
+
+  // The API returns an array of location objects; we need the data for the current hour.
+  // Choose index 0 time (or find nearest time index equal to now)
+  // We'll pick the first location to get the time array
+  const firstLoc = json[0] || json;
+  const times = firstLoc?.hourly?.time || firstLoc?.time || null;
+  if (!times) {
+    // If the format is locations-list
+    console.error('Réponse inattendue d\'Open-Meteo', json);
+    alert('Format de réponse Open-Meteo inattendu (voir console).');
+    return;
+  }
+
+  // find index of the timestamp equal (or nearest) to now ISO hour
+  function isoHour(d){ 
+    // API returns in local timezone when timezone=auto; we use same format
+    const pad = n => String(n).padStart(2,'0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:00`;
+  }
+  const target = isoHour(now);
+  let tIdx = times.indexOf(target);
+  if (tIdx === -1) {
+    // fallback nearest
+    let minDiff = Infinity;
+    for (let i=0;i<times.length;i++){
+      const dt = Math.abs(new Date(times[i]) - now);
+      if (dt < minDiff){ minDiff = dt; tIdx = i; }
+    }
+  }
+
+  // Build u & v arrays from each location
+  // If json is array per location: json[i].hourly.wind_speed_10m[tIdx]
+  const uArray = [];
+  const vArray = [];
+  const totalPts = grid.lats.length;
+
+  for (let idx=0; idx<totalPts; idx++){
+    const loc = json[idx];
+    if (!loc) {
+      // fallback: push zeros
+      uArray.push(0); vArray.push(0);
+      continue;
+    }
+    // Some variants: loc.hourly.wind_speed_10m OR loc.hourly?.wind_speed_10m
+    const wsArr = loc.hourly?.wind_speed_10m || loc.wind_speed_10m;
+    const wdArr = loc.hourly?.wind_direction_10m || loc.wind_direction_10m;
+    if (!wsArr || !wdArr) {
+      uArray.push(0); vArray.push(0);
+      continue;
+    }
+    const speed = Array.isArray(wsArr) ? wsArr[tIdx] : wsArr;
+    const dir = Array.isArray(wdArr) ? wdArr[tIdx] : wdArr;
+    // convert to u (eastward) and v (northward)
+    // meteorological wind direction = direction FROM which wind blows (degrees, 0=N)
+    // formulas: u = -speed * sin(theta), v = -speed * cos(theta)
+    const theta = dir * Math.PI / 180.0;
+    const u = -speed * Math.sin(theta);
+    const v = -speed * Math.cos(theta);
+    uArray.push(u);
+    vArray.push(v);
+  }
+
+  // Build object au format attendu par leaflet-velocity demo
+  // header: nx, ny, la1 (top), lo1 (left), la2 (bottom), lo2 (right), dx, dy, dateStamp
+  const header = {
+    nx: NX,
+    ny: NY,
+    la1: TOP,
+    lo1: LEFT,
+    la2: BOTTOM,
+    lo2: RIGHT,
+    dx: grid.dx,
+    dy: grid.dy,
+    // dateStamp for info (ISO)
+    dateStamp: new Date().toISOString()
+  };
+
+  // leaflet-velocity attend un tableau de deux enregistrements: [U, V]
+  // Chaque entrée: { header: {...}, data: [...] }
+  // Quelques métadonnées (optionnelles) pour compat:
+  const windData = [
+    {
+      header: {
+        ...header,
+        parameterCategory: 2, // vent
+        parameterNumber: 2,   // U-component
+        parameterUnit: 'km/h',
+        refTime: new Date().toISOString()
+      },
+      data: uArray
+    },
+    {
+      header: {
+        ...header,
+        parameterCategory: 2, // vent
+        parameterNumber: 3,   // V-component
+        parameterUnit: 'km/h',
+        refTime: new Date().toISOString()
+      },
+      data: vArray
+    }
+  ];
+
+  // === 2) Affichage Leaflet ===
+  const map = L.map('map').setView([44.85, -0.6], 9); // centre sur Gironde / Bordeaux
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors'
+  }).addTo(map);
+
+  // Draw bbox for Gironde
+  L.rectangle([[BOTTOM, LEFT],[TOP, RIGHT]], {color:'#ff7800', weight:1, fill:false}).addTo(map);
+
+  // Add velocity layer
+  const velocityLayer = L.velocityLayer({
+    displayValues: true,
+    displayOptions: {
+      position: "bottomleft",
+      emptyString: "Pas de données",
+      velocityType: "Vent",
+      speedUnit: "km/h",
+      directionString: "Dir",
+      speedString: "Vitesse"
+    },
+    data: windData,
+    minVelocity: 0,
+    maxVelocity: 25,
+    velocityScale: 0.005, // vitesse d'animation (laisser proche du défaut)
+    particleMultiplier: 0.0001,
+    lineWidth: 2.5 // épaisseur des particules
+  });
+
+  velocityLayer.addTo(map);
+
+  // Contrôle pour rafraîchir (recharge la page)
+  const refreshCtrl = L.control({position:'topright'});
+  refreshCtrl.onAdd = function(){
+    const div = L.DomUtil.create('div','leaflet-bar');
+    div.style.background = 'white';
+    div.style.padding = '4px';
+    div.style.cursor = 'pointer';
+    div.title = 'Rafraîchir (quitte et recharge les données)';
+    div.innerHTML = '🔁';
+    div.onclick = ()=> location.reload();
+    return div;
+  };
+  refreshCtrl.addTo(map);
+
+  console.log('Données vent prêtes', windData);
+
+})();
+</script>
+</body>
+</html>

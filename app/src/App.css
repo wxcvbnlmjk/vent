@@ -1,0 +1,46 @@
+/* App layout */
+html, body, #root {
+  height: 100%;
+}
+
+#root {
+  margin: 0;
+  padding: 0;
+}
+
+.appContainer {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #fff;
+  border-bottom: 1px solid #e5e7eb;
+  padding: 8px 12px;
+  z-index: 1000;
+}
+
+.map {
+  flex: 1;
+}
+
+/* Sliders stacked vertically */
+.sliders {
+  display: grid;
+  grid-template-columns: 1fr 3fr;
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 8px;
+}
+
+.sliderRow {
+  display: contents;
+}
+
+.sliderRow input[type="range"] {
+  width: 100%;
+}
