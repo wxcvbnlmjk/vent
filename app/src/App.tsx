@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import 'leaflet/dist/leaflet.css'
 import './App.css'
 
@@ -7,7 +7,7 @@ import L from 'leaflet'
 // @ts-ignore
 import 'leaflet-velocity/dist/leaflet-velocity.min.js'
 
-// Configuration France entière
+// Configuration France entière optimisée pour Pixel 7
 const FR_BBOX = { top: 51.1, bottom: 41.3, left: -5.5, right: 9.8 }
 const FR_CENTER: [number, number] = [46.6, 2.2]
 const NX = 8
@@ -243,6 +243,11 @@ async function fetchWindData(
 function MapWithVelocity() {
   const [loading, setLoading] = useState(false)
   const [dataSource, setDataSource] = useState<'localStorage' | 'api' | null>(null)
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    // Récupérer la préférence depuis le localStorage
+    const saved = localStorage.getItem('darkMode')
+    return saved ? JSON.parse(saved) : false
+  })
   // UI controls
   // density slider maps 1..5000 -> particleMultiplier in [1e-6 .. 5e-3]
   const [densitySlider, setDensitySlider] = useState<number>(500) // 500 -> 5e-4 (plus de particules visibles)
@@ -251,6 +256,39 @@ function MapWithVelocity() {
   const mapRef = useRef<L.Map | null>(null)
   const velocityRef = useRef<any>(null)
   const windRef = useRef<any>(null)
+  const tileLayerRef = useRef<L.TileLayer | null>(null)
+
+  // Fonction pour basculer le mode nuit
+  const toggleDarkMode = () => {
+    const newMode = !isDarkMode
+    setIsDarkMode(newMode)
+    // Sauvegarder la préférence dans le localStorage
+    localStorage.setItem('darkMode', JSON.stringify(newMode))
+  }
+
+  // Fonction pour mettre à jour la carte selon le mode
+  const updateMapTheme = () => {
+    const map = mapRef.current
+    if (!map) return
+
+    // Supprimer l'ancienne couche de tuiles
+    if (tileLayerRef.current) {
+      map.removeLayer(tileLayerRef.current)
+    }
+
+    // Ajouter la nouvelle couche selon le mode
+    const tileUrl = isDarkMode 
+      ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+      : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
+    
+    const attribution = isDarkMode 
+      ? '© OpenStreetMap contributors'
+      : '© OpenStreetMap contributors'
+
+    tileLayerRef.current = L.tileLayer(tileUrl, {
+      attribution,
+    }).addTo(map)
+  }
 
   // Fonction pour nettoyer le localStorage et forcer le rechargement
   const clearCacheAndReload = () => {
@@ -292,7 +330,7 @@ function MapWithVelocity() {
   }
 
   // Applique (ou réapplique) la couche velocity en fonction de l'état courant
-  const applyVelocityLayer = () => {
+  const applyVelocityLayer = useCallback(() => {
     const map = mapRef.current
     const wind = windRef.current
     if (!map || !wind) return
@@ -305,12 +343,13 @@ function MapWithVelocity() {
       data: wind,
       displayValues: true,
       displayOptions: {
-        position: 'bottomleft',
+        position: 'topleft',
         emptyString: '',
         velocityType: '',
         speedUnit: 'km/h',
         directionString: 'Dir.',
         speedString: 'Vit.',
+        css: isDarkMode ? 'color: white !important; background-color: black !important; padding: 5px !important; border-radius: 3px !important; border: 1px solid white !important; margin-top: 60px !important; font-weight: bold !important; text-shadow: none !important;' : 'color: black !important; background-color: white !important; padding: 5px !important; border-radius: 3px !important; border: 1px solid black !important; margin-top: 60px !important; font-weight: bold !important;'
       },
       minVelocity: 0,
       maxVelocity: 25,
@@ -320,7 +359,7 @@ function MapWithVelocity() {
     })
     v.addTo(map)
     velocityRef.current = v
-  }
+  }, [isDarkMode, particleMultiplier, lineWidth])
 
   useEffect(() => {
     if (mapRef.current) return
@@ -329,10 +368,15 @@ function MapWithVelocity() {
       5,
     )
     mapRef.current = map
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '© OpenStreetMap contributors',
-    }).addTo(map)
+    updateMapTheme()
   }, [])
+
+  // Effet pour mettre à jour le thème de la carte quand le mode change
+  useEffect(() => {
+    if (mapRef.current) {
+      updateMapTheme()
+    }
+  }, [isDarkMode])
 
   // (bbox retirée)
 
@@ -355,15 +399,17 @@ function MapWithVelocity() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [applyVelocityLayer])
 
   // Applique/rafraîchit la couche quand paramètres changent (sans refetch)
   useEffect(() => {
-    applyVelocityLayer()
-  }, [particleMultiplier, lineWidth])
+    if (windRef.current) {
+      applyVelocityLayer()
+    }
+  }, [applyVelocityLayer])
 
   return (
-    <div className="appContainer">
+    <div className={`appContainer ${isDarkMode ? 'dark-mode' : ''}`}>
       <div className="toolbar">
  
         <div className="sliders">
@@ -405,16 +451,15 @@ function MapWithVelocity() {
           </span>
         )}
         <button 
+          onClick={toggleDarkMode}
+          className="theme-toggle"
+          title={isDarkMode ? "Passer en mode jour" : "Passer en mode nuit"}
+        >
+          {isDarkMode ? '☀️' : '🌙'}
+        </button>
+        <button 
           onClick={clearCacheAndReload}
-          style={{
-            fontSize: '0.8em',
-            padding: '4px 8px',
-            marginLeft: '10px',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer'
-          }}
+          className="clear-cache-btn"
           title="Nettoyer le cache et recharger depuis l'API"
         >
         🔄
@@ -425,18 +470,18 @@ function MapWithVelocity() {
             {/* Badge GitHub */}
             <div style={{
         position: 'relative',
-        bottom: '50px',
+        bottom: '30px',
         left: '10px',
         zIndex: 1000
       }}>
         <a 
-          href="https://github.com/wxcvbnlmjk/velov" 
+          href="https://github.com/wxcvbnlmjk/vent" 
           target="_blank" 
           rel="noopener noreferrer"
           style={{ textDecoration: 'none' }}
         >
           <img 
-            src="https://img.shields.io/github/last-commit/wxcvbnlmjk/velov" 
+            src="https://img.shields.io/github/last-commit/wxcvbnlmjk/vent" 
             alt="Last commit"
             style={{
               height: '20px',
@@ -449,7 +494,7 @@ function MapWithVelocity() {
             {/* Badge GitHub */}
       <div style={{
         position: 'relative',
-        bottom: '100px',
+        bottom: '80px',
         left: '10px',
         zIndex: 2000
       }}>
